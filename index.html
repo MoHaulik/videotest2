@@ -14,18 +14,15 @@
     #status { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 12px; font-size: 16px; font-weight: 500; margin: 0; backdrop-filter: blur(8px); box-shadow: 0 4px 12px rgba(0,0,0,0.2); max-width: 80%; text-align: center; display: none; z-index: 1000; }
     .exit-ar { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.5); color: white; border: none; border-radius: 50%; width: 46px; height: 46px; display: none; align-items: center; justify-content: center; font-size: 24px; cursor: pointer; backdrop-filter: blur(8px); box-shadow: 0 2px 10px rgba(0,0,0,0.3); z-index: 1000; }
     .xr-active .exit-ar { display: flex; }
-    .controls { position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 8px 16px; border-radius: 20px; display: none; align-items: center; justify-content: center; backdrop-filter: blur(8px); box-shadow: 0 2px 10px rgba(0,0,0,0.3); z-index: 1000; }
-    .xr-active .controls { display: flex; }
-    .volume-toggle { background: none; border: none; color: white; font-size: 20px; cursor: pointer; width: 40px; height: 40px; }
+    #sound-toggle { position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.5); color: white; border: none; border-radius: 50%; width: 46px; height: 46px; display: none; align-items: center; justify-content: center; font-size: 24px; cursor: pointer; backdrop-filter: blur(8px); box-shadow: 0 2px 10px rgba(0,0,0,0.3); z-index: 1000; }
+    .xr-active #sound-toggle { display: flex; }
   </style>
 </head>
 <body>
   <div id="overlay"><button id="start-button">Start Video Demo</button></div>
   <button class="exit-ar" id="exit-ar">×</button>
+  <button id="sound-toggle">🔊</button>
   <div id="status"></div>
-  <div class="controls">
-    <button class="volume-toggle" id="volume-toggle">🔇</button>
-  </div>
   
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
@@ -33,11 +30,22 @@
     // Main variables
     let camera, scene, renderer, controllers = [], xrSession = null, videoPanel;
     let lastCameraPosition = new THREE.Vector3();
-    let movementThreshold = 0.005; // Slightly reduced threshold for better sensitivity
+    let movementThreshold = 0.01;
     let isMoving = false;
     let movementTimer = null;
     let longStillTimer = null;
-    let isLongStill = false;
+    let isSoundEnabled = false;
+    
+    // Transparency states and transition settings
+    const transparencyStates = {
+      moving: 0.6,         // Less transparent when moving (was 0.4)
+      idle: 0.9,           // Barely transparent when idle (was 0.85)
+      longIdle: 1.0        // Completely opaque after 30 seconds still
+    };
+    
+    // Transition time in milliseconds
+    const transitionDuration = 300;
+    let lastTransitionTime = 0;
     
     // Initialize WebXR components
     function init() {
@@ -65,21 +73,7 @@
       window.addEventListener('resize', onWindowResize);
       document.getElementById('start-button').addEventListener('click', startARSession);
       document.getElementById('exit-ar').addEventListener('click', endARSession);
-      document.getElementById('volume-toggle').addEventListener('click', toggleVolume);
-    }
-
-    // Toggle video volume
-    function toggleVolume() {
-      if (!videoPanel || !videoPanel.video) return;
-      
-      const volumeButton = document.getElementById('volume-toggle');
-      if (videoPanel.video.muted) {
-        videoPanel.video.muted = false;
-        volumeButton.textContent = '🔊';
-      } else {
-        videoPanel.video.muted = true;
-        volumeButton.textContent = '🔇';
-      }
+      document.getElementById('sound-toggle').addEventListener('click', toggleSound);
     }
 
     // Start AR session
@@ -142,29 +136,9 @@
       // Store initial camera position
       lastCameraPosition.copy(camera.position);
       
-      // Start long still detection
-      startLongStillDetection();
-      
       renderer.setAnimationLoop(render);
       session.addEventListener('end', onSessionEnd);
       updateStatus('Video player ready! You can now move freely in unbounded space.');
-    }
-    
-    // Start detection for long periods of sitting still
-    function startLongStillDetection() {
-      // Reset existing timer if there is one
-      if (longStillTimer) clearTimeout(longStillTimer);
-      
-      // Set long still timer (30 seconds)
-      longStillTimer = setTimeout(() => {
-        if (!isMoving) {
-          isLongStill = true;
-          // Smoothly transition to full opacity
-          if (videoPanel && videoPanel.panelMaterial) {
-            animateOpacity(videoPanel.panelMaterial, 1.0, 1000);
-          }
-        }
-      }, 30000); // 30 seconds
     }
     
     // End AR session
@@ -181,8 +155,8 @@
       xrSession = null;
       
       // Clear timers
-      if (movementTimer) clearTimeout(movementTimer);
-      if (longStillTimer) clearTimeout(longStillTimer);
+      clearTimeout(movementTimer);
+      clearTimeout(longStillTimer);
       
       // Clean up scene
       while(scene.children.length > 0) { 
@@ -199,30 +173,36 @@
       }
     }
     
-    // Smooth opacity animation
-    function animateOpacity(material, targetOpacity, duration = 500) {
-      if (!material) return;
+    // Smoothly transition panel opacity
+    function setTransparency(targetOpacity) {
+      if (!videoPanel || !videoPanel.panelMaterial) return;
       
-      const startOpacity = material.opacity;
-      const startTime = Date.now();
+      const currentOpacity = videoPanel.panelMaterial.opacity;
+      const startTime = performance.now();
+      lastTransitionTime = startTime;
       
-      function updateOpacity() {
-        const elapsedTime = Date.now() - startTime;
-        const progress = Math.min(elapsedTime / duration, 1);
+      // Animation function for smooth transitions
+      function animateOpacity(time) {
+        // If another transition started, stop this one
+        if (lastTransitionTime !== startTime) return;
         
-        // Use easeInOutCubic for smoother transition
-        const easing = progress < 0.5 
-          ? 4 * progress * progress * progress 
-          : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+        const elapsed = time - startTime;
+        const progress = Math.min(elapsed / transitionDuration, 1);
         
-        material.opacity = startOpacity + (targetOpacity - startOpacity) * easing;
+        // Ease function (cubic ease-out)
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
         
+        // Calculate interpolated opacity
+        videoPanel.panelMaterial.opacity = currentOpacity + (targetOpacity - currentOpacity) * easedProgress;
+        
+        // Continue animation if not complete
         if (progress < 1) {
-          requestAnimationFrame(updateOpacity);
+          requestAnimationFrame(animateOpacity);
         }
       }
       
-      updateOpacity();
+      // Start animation
+      requestAnimationFrame(animateOpacity);
     }
     
     function render() {
@@ -231,33 +211,27 @@
       
       if (movement > movementThreshold) {
         // User is moving
-        if (!isMoving) {
-          isMoving = true;
-          
-          // User was previously still for a long time, reset that state
-          if (isLongStill) {
-            isLongStill = false;
-          }
-          
-          // Start new long still detection
-          startLongStillDetection();
-          
-          // Set higher transparency while moving (less transparent than before)
-          if (videoPanel && videoPanel.panelMaterial) {
-            animateOpacity(videoPanel.panelMaterial, 0.6, 300); // Smoother transition to moving state
-          }
-        }
-        
+        isMoving = true;
         lastCameraPosition.copy(camera.position);
+        
+        // Set higher transparency while moving
+        setTransparency(transparencyStates.moving);
         
         // Reset the movement timer
         clearTimeout(movementTimer);
+        clearTimeout(longStillTimer);
+        
         movementTimer = setTimeout(() => {
           isMoving = false;
-          // Return to medium transparency when stopped
-          if (videoPanel && videoPanel.panelMaterial && !isLongStill) {
-            animateOpacity(videoPanel.panelMaterial, 0.9, 500); // Smoother transition to stopped state
-          }
+          // Return to normal transparency when stopped
+          setTransparency(transparencyStates.idle);
+          
+          // Start long-idle timer
+          longStillTimer = setTimeout(() => {
+            // Set to fully opaque after 30 seconds of being still
+            setTransparency(transparencyStates.longIdle);
+          }, 30000); // 30 seconds
+          
         }, 500); // Wait 500ms of no movement before considering "stopped"
       }
       
@@ -284,6 +258,20 @@
       if (!message.includes('error') && !message.includes('not supported')) {
         setTimeout(() => { statusElement.style.display = 'none'; }, 4000);
       }
+    }
+    
+    // Toggle sound function
+    function toggleSound() {
+      if (!videoPanel || !videoPanel.video) return;
+      
+      isSoundEnabled = !isSoundEnabled;
+      videoPanel.video.muted = !isSoundEnabled;
+      
+      // Update button text
+      const soundToggle = document.getElementById('sound-toggle');
+      soundToggle.textContent = isSoundEnabled ? '🔊' : '🔇';
+      
+      updateStatus(isSoundEnabled ? 'Sound enabled' : 'Sound muted');
     }
     
     // Video Panel Class
@@ -313,7 +301,7 @@
         this.video.src = 'your-video.mp4'; // Replace with your video path
         this.video.crossOrigin = 'anonymous';
         this.video.loop = true;
-        this.video.muted = true; // Start muted
+        this.video.muted = true; // Start muted by default
         this.video.playsInline = true;
         this.video.autoplay = true;
         
@@ -327,7 +315,7 @@
         this.panelMaterial = new THREE.MeshBasicMaterial({
           map: videoTexture,
           transparent: true,
-          opacity: 0.9, // Higher default opacity when not moving
+          opacity: transparencyStates.idle, // Default opacity when not moving
           side: THREE.DoubleSide
         });
         
@@ -339,16 +327,6 @@
           new THREE.PlaneGeometry(panelWidth, panelHeight),
           this.panelMaterial
         );
-        
-        // Create a subtle glow effect for the panel using edges
-        const edgeGeometry = new THREE.EdgesGeometry(this.panel.geometry);
-        const edgeMaterial = new THREE.LineBasicMaterial({ 
-          color: 0x4876FF,
-          transparent: true,
-          opacity: 0.2
-        });
-        const edge = new THREE.LineSegments(edgeGeometry, edgeMaterial);
-        this.panel.add(edge);
         
         this.panelGroup.add(this.panel);
         
